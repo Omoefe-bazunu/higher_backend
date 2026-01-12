@@ -3,9 +3,14 @@ const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
 const admin = require("firebase-admin");
-const axios = require("axios");
+const multer = require("multer"); // Added for file handling
+const { Resend } = require("resend");
 
 const app = express();
+const resend = new Resend(process.env.RESEND_API_KEY);
+
+// Set up Multer (temporary storage for incoming files)
+const upload = multer({ storage: multer.memoryStorage() });
 
 // ==========================================
 // 1. CORS CONFIGURATION
@@ -33,7 +38,7 @@ app.use(
     },
     credentials: true,
     methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "verif-hash"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
@@ -43,128 +48,98 @@ app.use(express.json());
 // 2. FIREBASE ADMIN INITIALIZATION
 // ==========================================
 let serviceAccount;
-
 try {
-  console.log("🔧 Initializing Firebase Admin...");
-
-  if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
-    if (fs.existsSync(process.env.FIREBASE_SERVICE_ACCOUNT_PATH)) {
-      const raw = fs.readFileSync(
-        process.env.FIREBASE_SERVICE_ACCOUNT_PATH,
-        "utf8"
-      );
-      serviceAccount = JSON.parse(raw);
-      console.log("✅ Service account loaded from ENV path");
-    }
-  } else if (fs.existsSync("./serviceAccountKey.json")) {
-    serviceAccount = require("./serviceAccountKey.json");
-    console.log("✅ Service account loaded from local file");
+  if (
+    process.env.FIREBASE_SERVICE_ACCOUNT_PATH &&
+    fs.existsSync(process.env.FIREBASE_SERVICE_ACCOUNT_PATH)
+  ) {
+    serviceAccount = JSON.parse(
+      fs.readFileSync(process.env.FIREBASE_SERVICE_ACCOUNT_PATH, "utf8")
+    );
   } else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
-    console.log("✅ Service account loaded from environment variable");
   }
 
   if (!admin.apps.length && serviceAccount) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
+      storageBucket: "high-48d.firebasestorage.app", // Make sure this matches your project ID
     });
-    console.log("✅ Firebase Admin Initialized Successfully");
-  } else if (!admin.apps.length) {
-    process.exit(1);
+    console.log("✅ Firebase Admin Initialized");
   }
 } catch (err) {
+  console.error("❌ Firebase Init Error", err);
   process.exit(1);
 }
 
 const db = admin.firestore();
+const bucket = admin.storage().bucket();
 
 // ==========================================
-// 3. FLUTTERWAVE PAYMENT API
+// 3. MANUAL ENROLLMENT SYSTEM
 // ==========================================
 
-// Route: Initialize Payment
-app.post("/api/payments/initialize", async (req, res) => {
-  const { courseId, email, name, amount } = req.body;
-
-  try {
-    const tx_ref = `BASIC_${courseId}_${Date.now()}`;
-
-    const response = await axios.post(
-      "https://api.flutterwave.com/v3/payments",
-      {
-        tx_ref: tx_ref, // Unique reference [cite: 6, 7]
-        amount: amount, // Charge amount [cite: 7]
-        currency: "NGN", // Default currency [cite: 8]
-        redirect_url: `${process.env.CLIENT_ORIGIN}/basic/dashboard?status=success&course=${courseId}`, // Redirect after completion [cite: 9]
-        customer: {
-          email: email, // Required email [cite: 10]
-          name: name,
-        },
-        // Configuration to handle timeouts and retries [cite: 45, 48]
-        configurations: {
-          session_duration: 10, // 10 minutes session [cite: 52]
-          max_retry_attempt: 5, // 5 retry attempts [cite: 52]
-        },
-        customizations: {
-          title: "HIGH-ER BASIC Training",
-          description: "Enrolling in HIGH-ER ENTERPRISES BASIC Course",
-          // Use a reliable Firebase Storage URL to prevent TIMEOUT errors
-          logo: "https://firebasestorage.googleapis.com/v0/b/high-481fd.firebasestorage.app/o/logop.png?alt=media&token=22625ad4-b6ef-4623-a098-036843cddea3",
-        },
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`, // Bearer token auth [cite: 24]
-          "Content-Type": "application/json",
-        },
-      }
-    );
-
-    res.json({ success: true, link: response.data.data.link });
-  } catch (err) {
-    res.status(500).json({ error: err.response?.data || err.message });
-  }
-});
-
-// Route: Webhook
-app.post("/api/webhook/flutterwave", async (req, res) => {
-  const secretHash = process.env.FLW_SECRET_HASH; // Stored as env variable [cite: 80]
-  const signature = req.headers["verif-hash"]; // Check for verif-hash header [cite: 81]
-
-  if (!signature || signature !== secretHash) {
-    return res.status(401).end(); // Discard if signature doesn't match [cite: 83]
-  }
-
-  const payload = req.body;
-
-  // Handle successful charge events [cite: 75, 76]
-  if (
-    payload.event === "charge.completed" &&
-    payload.data.status === "successful"
-  ) {
-    const { tx_ref, customer } = payload.data;
-    const courseId = tx_ref.split("_")[1];
-    const userEmail = customer.email;
-
+app.post(
+  "/api/enrollments/submit",
+  upload.single("receipt"),
+  async (req, res) => {
     try {
-      await db
-        .collection("basicCourses")
-        .doc(courseId)
-        .update({
-          students: admin.firestore.FieldValue.arrayUnion(userEmail),
+      const { courseId, courseTitle, userId, userEmail, userName, amountPaid } =
+        req.body;
+      const file = req.file;
+
+      if (!file)
+        return res.status(400).json({ error: "No receipt file uploaded" });
+
+      // 1. Upload to Firebase Storage via Backend
+      const fileName = `receipts/${userId}_${Date.now()}_${file.originalname}`;
+      const blob = bucket.file(fileName);
+      const blobStream = blob.createWriteStream({
+        metadata: { contentType: file.mimetype },
+      });
+
+      blobStream.on("error", (err) =>
+        res.status(500).json({ error: err.message })
+      );
+
+      blobStream.on("finish", async () => {
+        // Get the Public URL
+        await blob.makePublic();
+        const receiptUrl = `https://storage.googleapis.com/${bucket.name}/${fileName}`;
+
+        // 2. Create Firestore Record
+        const enrollmentData = {
+          courseId,
+          courseTitle,
+          userId,
+          userEmail,
+          amountPaid: parseFloat(amountPaid),
+          receiptUrl,
+          status: "pending",
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        };
+
+        await db.collection("enrollments").add(enrollmentData);
+
+        // 3. Send Email Notification via Resend
+        await resend.emails.send({
+          from: "HIGH-ER Training <info@higher.com.ng>",
+          to: "raniem57@gmail.com",
+          subject: `New Enrollment: ${courseTitle} - ${userName}`,
+          text: `Student: ${userName}\nEmail: ${userEmail}\nAmount: ₦${amountPaid}\nView Receipt: ${receiptUrl}`,
         });
-      console.log(`✅ Access Granted: ${userEmail} to ${courseId}`);
-    } catch (error) {
-      console.error("Webhook Firestore Error:", error);
+
+        res.json({ success: true });
+      });
+
+      blobStream.end(file.buffer);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Internal server error" });
     }
   }
-  res.status(200).end(); // Respond quickly to avoid timeout [cite: 104, 105]
-});
+);
 
-// ==========================================
-// 4. HEALTH CHECK & START
-// ==========================================
 app.get("/", (req, res) => res.send("HIGH-ER Backend Active 🚀"));
-
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`Server on port ${PORT}`));
