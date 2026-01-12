@@ -39,32 +39,63 @@ app.use(
 app.use(express.json());
 
 // ==========================================
-// 2. FIREBASE ADMIN INITIALIZATION
+// 1. FIREBASE ADMIN INITIALIZATION
 // ==========================================
 let serviceAccount;
 
 try {
-  if (
-    process.env.FIREBASE_SERVICE_ACCOUNT_PATH &&
-    fs.existsSync(process.env.FIREBASE_SERVICE_ACCOUNT_PATH)
-  ) {
-    const raw = fs.readFileSync(
-      process.env.FIREBASE_SERVICE_ACCOUNT_PATH,
-      "utf8"
-    );
-    serviceAccount = JSON.parse(raw);
-  } else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  console.log("🔧 Initializing Firebase Admin...");
+  console.log("📂 Current directory:", process.cwd());
+  console.log("🔍 ENV PATH:", process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+
+  // Option A: Render Secret File Path
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
+    console.log("🔍 Checking path:", process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+
+    if (fs.existsSync(process.env.FIREBASE_SERVICE_ACCOUNT_PATH)) {
+      const raw = fs.readFileSync(
+        process.env.FIREBASE_SERVICE_ACCOUNT_PATH,
+        "utf8"
+      );
+      serviceAccount = JSON.parse(raw);
+      console.log("✅ Service account loaded from ENV path");
+    } else {
+      console.error(
+        "❌ File not found at:",
+        process.env.FIREBASE_SERVICE_ACCOUNT_PATH
+      );
+    }
+  }
+  // Option B: Local Development
+  else if (fs.existsSync("./serviceAccountKey.json")) {
+    serviceAccount = require("./serviceAccountKey.json");
+    console.log("✅ Service account loaded from local file");
+  }
+  // Option C: Environment Variable (Backup method)
+  else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+    console.log("✅ Service account loaded from environment variable");
+  } else {
+    console.error("❌ No service account credentials found!");
+    console.log("Checked:");
+    console.log("  1. ENV PATH:", process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
+    console.log("  2. Local: ./serviceAccountKey.json");
+    console.log("  3. ENV VAR: FIREBASE_SERVICE_ACCOUNT");
   }
 
+  // Initialize Firebase Admin
   if (!admin.apps.length && serviceAccount) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
-    console.log("✅ Firebase Admin Initialized");
+    console.log("✅ Firebase Admin Initialized Successfully");
+  } else if (!admin.apps.length) {
+    console.error("❌ Firebase Admin initialization failed - no credentials");
+    process.exit(1);
   }
 } catch (err) {
-  console.error("❌ Firebase Initialization Error:", err);
+  console.error("❌ Firebase Admin initialization error:", err);
+  process.exit(1);
 }
 
 const db = admin.firestore();
