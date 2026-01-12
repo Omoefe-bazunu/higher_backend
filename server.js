@@ -40,19 +40,14 @@ app.use(
 app.use(express.json());
 
 // ==========================================
-// 1. FIREBASE ADMIN INITIALIZATION
+// 2. FIREBASE ADMIN INITIALIZATION
 // ==========================================
 let serviceAccount;
 
 try {
   console.log("🔧 Initializing Firebase Admin...");
-  console.log("📂 Current directory:", process.cwd());
-  console.log("🔍 ENV PATH:", process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
 
-  // Option A: Render Secret File Path
   if (process.env.FIREBASE_SERVICE_ACCOUNT_PATH) {
-    console.log("🔍 Checking path:", process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
-
     if (fs.existsSync(process.env.FIREBASE_SERVICE_ACCOUNT_PATH)) {
       const raw = fs.readFileSync(
         process.env.FIREBASE_SERVICE_ACCOUNT_PATH,
@@ -60,42 +55,24 @@ try {
       );
       serviceAccount = JSON.parse(raw);
       console.log("✅ Service account loaded from ENV path");
-    } else {
-      console.error(
-        "❌ File not found at:",
-        process.env.FIREBASE_SERVICE_ACCOUNT_PATH
-      );
     }
-  }
-  // Option B: Local Development
-  else if (fs.existsSync("./serviceAccountKey.json")) {
+  } else if (fs.existsSync("./serviceAccountKey.json")) {
     serviceAccount = require("./serviceAccountKey.json");
     console.log("✅ Service account loaded from local file");
-  }
-  // Option C: Environment Variable (Backup method)
-  else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  } else if (process.env.FIREBASE_SERVICE_ACCOUNT) {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
     console.log("✅ Service account loaded from environment variable");
-  } else {
-    console.error("❌ No service account credentials found!");
-    console.log("Checked:");
-    console.log("  1. ENV PATH:", process.env.FIREBASE_SERVICE_ACCOUNT_PATH);
-    console.log("  2. Local: ./serviceAccountKey.json");
-    console.log("  3. ENV VAR: FIREBASE_SERVICE_ACCOUNT");
   }
 
-  // Initialize Firebase Admin
   if (!admin.apps.length && serviceAccount) {
     admin.initializeApp({
       credential: admin.credential.cert(serviceAccount),
     });
     console.log("✅ Firebase Admin Initialized Successfully");
   } else if (!admin.apps.length) {
-    console.error("❌ Firebase Admin initialization failed - no credentials");
     process.exit(1);
   }
 } catch (err) {
-  console.error("❌ Firebase Admin initialization error:", err);
   process.exit(1);
 }
 
@@ -115,23 +92,29 @@ app.post("/api/payments/initialize", async (req, res) => {
     const response = await axios.post(
       "https://api.flutterwave.com/v3/payments",
       {
-        tx_ref: tx_ref,
-        amount: amount,
-        currency: "NGN",
-        redirect_url: `${process.env.CLIENT_ORIGIN}/basic/dashboard?status=success&course=${courseId}`,
+        tx_ref: tx_ref, // Unique reference [cite: 6, 7]
+        amount: amount, // Charge amount [cite: 7]
+        currency: "NGN", // Default currency [cite: 8]
+        redirect_url: `${process.env.CLIENT_ORIGIN}/basic/dashboard?status=success&course=${courseId}`, // Redirect after completion [cite: 9]
         customer: {
-          email: email,
+          email: email, // Required email [cite: 10]
           name: name,
+        },
+        // Configuration to handle timeouts and retries [cite: 45, 48]
+        configurations: {
+          session_duration: 10, // 10 minutes session [cite: 52]
+          max_retry_attempt: 5, // 5 retry attempts [cite: 52]
         },
         customizations: {
           title: "HIGH-ER BASIC Training",
-          description: "Enrolling in Technical Track",
-          logo: "https://higher.com.ng/logo.png",
+          description: "Enrolling in HIGH-ER ENTERPRISES BASIC Course",
+          // Use a reliable Firebase Storage URL to prevent TIMEOUT errors
+          logo: "https://firebasestorage.googleapis.com/v0/b/high-481fd.firebasestorage.app/o/logop.png?alt=media&token=22625ad4-b6ef-4623-a098-036843cddea3",
         },
       },
       {
         headers: {
-          Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
+          Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`, // Bearer token auth [cite: 24]
           "Content-Type": "application/json",
         },
       }
@@ -145,18 +128,21 @@ app.post("/api/payments/initialize", async (req, res) => {
 
 // Route: Webhook
 app.post("/api/webhook/flutterwave", async (req, res) => {
-  const secretHash = process.env.FLW_SECRET_HASH;
-  const signature = req.headers["verif-hash"];
+  const secretHash = process.env.FLW_SECRET_HASH; // Stored as env variable [cite: 80]
+  const signature = req.headers["verif-hash"]; // Check for verif-hash header [cite: 81]
 
   if (!signature || signature !== secretHash) {
-    return res.status(401).end();
+    return res.status(401).end(); // Discard if signature doesn't match [cite: 83]
   }
 
   const payload = req.body;
 
-  if (payload.event === "charge.completed" && payload.status === "successful") {
+  // Handle successful charge events [cite: 75, 76]
+  if (
+    payload.event === "charge.completed" &&
+    payload.data.status === "successful"
+  ) {
     const { tx_ref, customer } = payload.data;
-    // Format: BASIC_courseId_timestamp
     const courseId = tx_ref.split("_")[1];
     const userEmail = customer.email;
 
@@ -172,7 +158,7 @@ app.post("/api/webhook/flutterwave", async (req, res) => {
       console.error("Webhook Firestore Error:", error);
     }
   }
-  res.status(200).end();
+  res.status(200).end(); // Respond quickly to avoid timeout [cite: 104, 105]
 });
 
 // ==========================================
