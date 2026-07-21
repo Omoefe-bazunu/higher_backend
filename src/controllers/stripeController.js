@@ -10,18 +10,18 @@ const SITE_URL = process.env.FRONTEND_URL;
 // Looks up canonical product data by ID. This is the ONLY place
 // price/name/category should ever come from — never trust the client.
 
-async function getProductsByIds(ids) {
+async function getArtworksByIds(ids) {
   const uniqueIds = [...new Set(ids)];
   const refs = uniqueIds.map((id) => db.collection("artworks").doc(id));
   const snaps = await db.getAll(...refs);
 
-  const products = {};
+  const artworks = {};
   snaps.forEach((snap, i) => {
     if (snap.exists) {
-      products[uniqueIds[i]] = { id: snap.id, ...snap.data() };
+      artworks[uniqueIds[i]] = { id: snap.id, ...snap.data() };
     }
   });
-  return products;
+  return artworks;
 }
 
 async function createCheckoutSession(req, res) {
@@ -39,9 +39,9 @@ async function createCheckoutSession(req, res) {
 
     // Client only sends {id, quantity} now — everything else is looked up.
     const ids = cart.map((item) => item.id);
-    const products = await getProductsByIds(ids);
+    const artworks = await getArtworksByIds(ids);
 
-    const missing = ids.filter((id) => !products[id]);
+    const missing = ids.filter((id) => !artworks[id]);
     if (missing.length > 0) {
       return res.status(400).json({
         error: `Unknown product(s): ${missing.join(", ")}`,
@@ -49,7 +49,7 @@ async function createCheckoutSession(req, res) {
     }
 
     const items = cart.map((cartItem) => {
-      const product = products[cartItem.id];
+      const product = artworks[cartItem.id];
       const quantity = Number(cartItem.quantity);
 
       if (!Number.isInteger(quantity) || quantity < 1) {
