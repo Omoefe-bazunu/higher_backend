@@ -9,9 +9,10 @@ const SITE_URL = process.env.FRONTEND_URL;
 
 // Looks up canonical product data by ID. This is the ONLY place
 // price/name/category should ever come from — never trust the client.
+
 async function getProductsByIds(ids) {
   const uniqueIds = [...new Set(ids)];
-  const refs = uniqueIds.map((id) => db.collection("products").doc(id));
+  const refs = uniqueIds.map((id) => db.collection("artworks").doc(id));
   const snaps = await db.getAll(...refs);
 
   const products = {};
