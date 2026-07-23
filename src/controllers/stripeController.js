@@ -7,9 +7,6 @@ const {
 
 const SITE_URL = process.env.FRONTEND_URL;
 
-// Looks up canonical product data by ID. This is the ONLY place
-// price/name/category should ever come from — never trust the client.
-
 async function getArtworksByIds(ids) {
   const uniqueIds = [...new Set(ids)];
   const refs = uniqueIds.map((id) => db.collection("artworks").doc(id));
@@ -37,7 +34,6 @@ async function createCheckoutSession(req, res) {
       return res.status(400).json({ error: "Missing customer info" });
     }
 
-    // Client only sends {id, quantity} now — everything else is looked up.
     const ids = cart.map((item) => item.id);
     const artworks = await getArtworksByIds(ids);
 
@@ -59,7 +55,7 @@ async function createCheckoutSession(req, res) {
       return {
         id: product.id,
         name: product.name,
-        price: product.price, // canonical, from Firestore
+        price: product.price,
         category: product.category || "General",
         dimensions: product.dimensions || "",
         quantity,
@@ -85,7 +81,6 @@ async function createCheckoutSession(req, res) {
       quantity: item.quantity,
     }));
 
-    // Create the order only after prices are verified server-side.
     const orderRef = await db.collection("orders").add({
       customerName: name.trim(),
       customerEmail: email.trim(),
@@ -98,6 +93,8 @@ async function createCheckoutSession(req, res) {
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
+    console.log(`[checkout] order created: ${orderRef.id}`);
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
@@ -108,6 +105,8 @@ async function createCheckoutSession(req, res) {
       cancel_url: `${SITE_URL}/checkout?status=cancelled`,
     });
 
+    console.log(`[checkout] stripe session created: ${session.id}, orderId in metadata: ${session.metadata.orderId}`);
+
     res.json({ url: session.url, orderId: orderRef.id });
   } catch (err) {
     console.error("Stripe session error:", err);
@@ -116,6 +115,10 @@ async function createCheckoutSession(req, res) {
 }
 
 async function handleStripeWebhook(req, res) {
+  console.log("[webhook] request received");
+  console.log("[webhook] body is Buffer:", Buffer.isBuffer(req.body));
+  console.log("[webhook] signature header present:", !!req.headers["stripe-signature"]);
+
   const sig = req.headers["stripe-signature"];
 
   let event;
@@ -125,8 +128,9 @@ async function handleStripeWebhook(req, res) {
       sig,
       process.env.STRIPE_WEBHOOK_SECRET,
     );
+    console.log(`[webhook] signature verified. event type: ${event.type}`);
   } catch (err) {
-    console.error("Webhook signature verification failed:", err.message);
+    console.error("[webhook] signature verification failed:", err.message);
     return res.status(400).json({ error: "Invalid signature" });
   }
 
@@ -134,8 +138,10 @@ async function handleStripeWebhook(req, res) {
     const session = event.data.object;
     const orderId = session.metadata?.orderId;
 
+    console.log(`[webhook] checkout.session.completed for orderId: ${orderId}`);
+
     if (!orderId) {
-      console.error("Webhook: no orderId in session metadata");
+      console.error("[webhook] no orderId in session metadata");
       return res.json({ received: true });
     }
 
@@ -144,14 +150,16 @@ async function handleStripeWebhook(req, res) {
       const orderSnap = await orderRef.get();
 
       if (!orderSnap.exists) {
-        console.error(`Webhook: order ${orderId} not found`);
+        console.error(`[webhook] order ${orderId} not found in Firestore`);
         return res.json({ received: true });
       }
 
       const order = orderSnap.data();
+      console.log(`[webhook] found order ${orderId}, current status: ${order.status}`);
 
       if (order.status === "paid") {
-        return res.json({ received: true }); // already fulfilled, Stripe retry
+        console.log(`[webhook] order ${orderId} already paid, skipping (Stripe retry)`);
+        return res.json({ received: true });
       }
 
       await orderRef.update({
@@ -161,6 +169,8 @@ async function handleStripeWebhook(req, res) {
         paidAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
+      console.log(`[webhook] order ${orderId} marked as paid`);
+
       await notifyAdminOfOrder({
         orderId,
         customerName: order.customerName,
@@ -169,16 +179,22 @@ async function handleStripeWebhook(req, res) {
         totalAmount: order.totalAmount,
       });
 
+      console.log(`[webhook] admin notification sent for ${orderId}`);
+
       await notifyClientOfOrder({
         customerName: order.customerName,
         customerEmail: order.customerEmail,
         orderId,
         totalAmount: order.totalAmount,
       });
+
+      console.log(`[webhook] client notification sent for ${orderId}`);
     } catch (err) {
-      console.error("Order fulfillment error:", err);
+      console.error("[webhook] fulfillment error:", err);
       return res.status(500).json({ error: "Fulfillment failed" });
     }
+  } else {
+    console.log(`[webhook] ignored event type: ${event.type}`);
   }
 
   res.json({ received: true });
