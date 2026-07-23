@@ -6,25 +6,23 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors({ origin: process.env.FRONTEND_URL }));
-app.use(express.json());
 
 const stripeRoutes = require("./src/routes/stripeRoutes");
+
+// Webhook route must be mounted BEFORE express.json(), with raw body.
+// This bypasses global JSON parsing entirely for this one path.
+app.use(
+  "/api/webhook/stripe",
+  express.raw({ type: "application/json" }),
+  require("./src/controllers/stripeController").handleStripeWebhook
+);
+
+// Everything else uses normal JSON parsing
+app.use(express.json());
 app.use("/api", stripeRoutes);
 
 app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    timestamp: new Date().toISOString(),
-    service: "Backend",
-  });
-});
-
-app.get("/webhook/test", (req, res) => {
-  res.json({
-    message: "Webhook endpoint is accessible",
-    urls: ["/api/webhook/stripe"],
-    method: "POST",
-  });
+  res.json({ status: "ok", timestamp: new Date().toISOString(), service: "Backend" });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
