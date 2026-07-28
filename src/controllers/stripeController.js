@@ -23,7 +23,7 @@ async function getArtworksByIds(ids) {
 
 async function createCheckoutSession(req, res) {
   try {
-    const { cart, customerInfo } = req.body;
+    const { cart, customerInfo, idToken } = req.body;
 
     if (!Array.isArray(cart) || cart.length === 0) {
       return res.status(400).json({ error: "Cart is empty" });
@@ -32,6 +32,16 @@ async function createCheckoutSession(req, res) {
     const { name, email, address, city, country } = customerInfo || {};
     if (!name || !email || !address || !city || !country) {
       return res.status(400).json({ error: "Missing customer info" });
+    }
+
+    let customerUid = null;
+    if (idToken) {
+      try {
+        const decoded = await admin.auth().verifyIdToken(idToken);
+        customerUid = decoded.uid;
+      } catch (err) {
+        console.error("[checkout] invalid idToken, proceeding as guest:", err.message);
+      }
     }
 
     const ids = cart.map((item) => item.id);
@@ -82,6 +92,7 @@ async function createCheckoutSession(req, res) {
     }));
 
     const orderRef = await db.collection("orders").add({
+      customerUid,
       customerName: name.trim(),
       customerEmail: email.trim(),
       shippingAddress: address.trim(),
