@@ -4,6 +4,8 @@ const {
   notifyAdminOfOrder,
   notifyClientOfOrder,
 } = require("../services/orderNotify");
+const { sendTikTokEvent } = require("../services/tiktokEvents");
+const { randomUUID } = require("crypto");
 
 const SITE_URL = process.env.FRONTEND_URL;
 
@@ -11,7 +13,6 @@ async function getArtworksByIds(ids) {
   const uniqueIds = [...new Set(ids)];
   const refs = uniqueIds.map((id) => db.collection("artworks").doc(id));
   const snaps = await db.getAll(...refs);
-
   const artworks = {};
   snaps.forEach((snap, i) => {
     if (snap.exists) {
@@ -40,7 +41,10 @@ async function createCheckoutSession(req, res) {
         const decoded = await admin.auth().verifyIdToken(idToken);
         customerUid = decoded.uid;
       } catch (err) {
-        console.error("[checkout] invalid idToken, proceeding as guest:", err.message);
+        console.error(
+          "[checkout] invalid idToken, proceeding as guest:",
+          err.message,
+        );
       }
     }
 
@@ -116,7 +120,9 @@ async function createCheckoutSession(req, res) {
       cancel_url: `${SITE_URL}/checkout?status=cancelled`,
     });
 
-    console.log(`[checkout] stripe session created: ${session.id}, orderId in metadata: ${session.metadata.orderId}`);
+    console.log(
+      `[checkout] stripe session created: ${session.id}, orderId in metadata: ${session.metadata.orderId}`,
+    );
 
     res.json({ url: session.url, orderId: orderRef.id });
   } catch (err) {
@@ -128,11 +134,14 @@ async function createCheckoutSession(req, res) {
 async function handleStripeWebhook(req, res) {
   console.log("[webhook] request received");
   console.log("[webhook] body is Buffer:", Buffer.isBuffer(req.body));
-  console.log("[webhook] signature header present:", !!req.headers["stripe-signature"]);
+  console.log(
+    "[webhook] signature header present:",
+    !!req.headers["stripe-signature"],
+  );
 
   const sig = req.headers["stripe-signature"];
-
   let event;
+
   try {
     event = stripe.webhooks.constructEvent(
       req.body,
@@ -166,10 +175,14 @@ async function handleStripeWebhook(req, res) {
       }
 
       const order = orderSnap.data();
-      console.log(`[webhook] found order ${orderId}, current status: ${order.status}`);
+      console.log(
+        `[webhook] found order ${orderId}, current status: ${order.status}`,
+      );
 
       if (order.status === "paid") {
-        console.log(`[webhook] order ${orderId} already paid, skipping (Stripe retry)`);
+        console.log(
+          `[webhook] order ${orderId} already paid, skipping (Stripe retry)`,
+        );
         return res.json({ received: true });
       }
 
@@ -189,7 +202,6 @@ async function handleStripeWebhook(req, res) {
         items: order.items,
         totalAmount: order.totalAmount,
       });
-
       console.log(`[webhook] admin notification sent for ${orderId}`);
 
       await notifyClientOfOrder({
@@ -198,8 +210,32 @@ async function handleStripeWebhook(req, res) {
         orderId,
         totalAmount: order.totalAmount,
       });
-
       console.log(`[webhook] client notification sent for ${orderId}`);
+
+      // ========== TIKTOK PURCHASE EVENT ==========
+      try {
+        const eventId = randomUUID();
+
+        const contents = (order.items || []).map((item) => ({
+          content_id: item.id,
+          content_type: "product",
+          content_name: item.name,
+        }));
+
+        await sendTikTokEvent({
+          event: "Purchase",
+          event_id: eventId,
+          email: order.customerEmail,
+          value: order.totalAmount,
+          contents,
+          url: `${SITE_URL}/orders?status=success`,
+        });
+
+        console.log(`[TikTok] Purchase event sent for order ${orderId}`);
+      } catch (tiktokErr) {
+        console.error("[TikTok] Failed to send Purchase event:", tiktokErr);
+        // We don't fail the webhook if TikTok fails
+      }
     } catch (err) {
       console.error("[webhook] fulfillment error:", err);
       return res.status(500).json({ error: "Fulfillment failed" });
